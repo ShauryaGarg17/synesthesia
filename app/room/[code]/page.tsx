@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useMemo, useState, useEffect, useRef, useCallback } from "react";
+import {
+  type FormEvent,
+  useMemo,
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+} from "react";
 import { useMutation, useQuery } from "convex/react";
 
 import { api } from "@/convex/_generated/api";
@@ -46,8 +53,13 @@ export default function RoomPage({ params }: RoomPageProps) {
     api.votes.listVotesForUser,
     room && userId ? { roomId: room._id, userId } : "skip",
   );
+  const recentlyPlayed = useQuery(
+    api.playedSongs.listRecentlyPlayed,
+    room ? { roomId: room._id } : "skip",
+  );
 
   const addSong = useMutation(api.songs.addSong);
+  const readdSong = useMutation(api.playedSongs.readdSong);
   const removeSong = useMutation(api.songs.removeSong);
   const adminSetScore = useMutation(api.songs.adminSetScore);
   const castVote = useMutation(api.votes.castVote);
@@ -66,6 +78,19 @@ export default function RoomPage({ params }: RoomPageProps) {
 
   // Vote animation tracking
   const [votedSongs, setVotedSongs] = useState<Set<string>>(new Set());
+
+  // Track voting in progress to prevent double-clicks
+  const [votingInProgress, setVotingInProgress] = useState<Set<string>>(
+    new Set(),
+  );
+
+  // Track re-adding in progress to prevent double-clicks
+  const [readdingInProgress, setReaddingInProgress] = useState<Set<string>>(
+    new Set(),
+  );
+
+  // Recently played section expanded state
+  const [recentlyPlayedExpanded, setRecentlyPlayedExpanded] = useState(false);
 
   // Admin-specific state
   const [scoreInputs, setScoreInputs] = useState<Record<string, string>>({});
@@ -102,7 +127,9 @@ export default function RoomPage({ params }: RoomPageProps) {
         const cur = ytPlayer.getCurrentTime?.() ?? 0;
         const dur = ytPlayer.getDuration?.() ?? 0;
         setSeekProgress(dur > 0 ? cur / dur : 0);
-      } catch { /* player not ready */ }
+      } catch {
+        /* player not ready */
+      }
       seekRafRef.current = requestAnimationFrame(tick);
     };
     seekRafRef.current = requestAnimationFrame(tick);
@@ -122,7 +149,9 @@ export default function RoomPage({ params }: RoomPageProps) {
       } else {
         ytPlayer.playVideo();
       }
-    } catch { /* player not ready */ }
+    } catch {
+      /* player not ready */
+    }
   }, [ytPlayer, room?.isPaused]);
 
   // Drag & drop state for queue reorder (host only)
@@ -181,7 +210,9 @@ export default function RoomPage({ params }: RoomPageProps) {
       try {
         const state = ytPlayer.getPlayerState();
         if (state === 0) handleSongEnd(); // 0 = ended
-      } catch { /* player not ready */ }
+      } catch {
+        /* player not ready */
+      }
     }, 2000);
 
     // When the tab becomes visible, immediately check if the song ended
@@ -190,7 +221,9 @@ export default function RoomPage({ params }: RoomPageProps) {
         try {
           const state = ytPlayer.getPlayerState();
           if (state === 0) handleSongEnd();
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
@@ -267,12 +300,24 @@ export default function RoomPage({ params }: RoomPageProps) {
         <div className="relative z-10 w-full max-w-md">
           <div className="glass rounded-3xl p-8 sm:p-10">
             <div className="w-12 h-12 rounded-2xl bg-primary flex items-center justify-center mb-6">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-white">
-                <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                className="text-white"
+              >
+                <path d="M9 18V5l12-2v13" />
+                <circle cx="6" cy="18" r="3" />
+                <circle cx="18" cy="16" r="3" />
               </svg>
             </div>
             <h2 className="text-2xl font-bold mb-1.5">Join the session</h2>
-            <p className="text-white/35 text-sm mb-8">Choose a name so others know who{"'"}s in the mix.</p>
+            <p className="text-white/35 text-sm mb-8">
+              Choose a name so others know who{"'"}s in the mix.
+            </p>
             <form
               className="space-y-4"
               onSubmit={(e) => {
@@ -368,6 +413,11 @@ export default function RoomPage({ params }: RoomPageProps) {
       setError("Room or user not ready yet.");
       return;
     }
+
+    // Prevent double-clicks while vote is processing
+    if (votingInProgress.has(songId)) return;
+
+    setVotingInProgress((prev) => new Set(prev).add(songId));
     setError(null);
     // Trigger burst animation
     setVotedSongs((prev) => new Set(prev).add(songId));
@@ -387,6 +437,42 @@ export default function RoomPage({ params }: RoomPageProps) {
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to cast vote.");
+    } finally {
+      setVotingInProgress((prev) => {
+        const next = new Set(prev);
+        next.delete(songId);
+        return next;
+      });
+    }
+  };
+
+  const handleReaddSong = async (playedSongId: Id<"playedSongs">) => {
+    if (!room || !userId) {
+      setError("Room or user not ready yet.");
+      return;
+    }
+
+    // Prevent double-clicks
+    if (readdingInProgress.has(playedSongId)) return;
+
+    setReaddingInProgress((prev) => new Set(prev).add(playedSongId));
+    setError(null);
+
+    try {
+      await readdSong({
+        roomId: room._id,
+        playedSongId,
+        userId,
+        userName: userName ?? undefined,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to re-add song.");
+    } finally {
+      setReaddingInProgress((prev) => {
+        const next = new Set(prev);
+        next.delete(playedSongId);
+        return next;
+      });
     }
   };
 
@@ -484,7 +570,9 @@ export default function RoomPage({ params }: RoomPageProps) {
         <div className="glass rounded-3xl p-10 max-w-md text-center">
           <div className="text-5xl mb-4 opacity-30">🔇</div>
           <h2 className="text-xl font-bold mb-2">Room not found</h2>
-          <p className="text-white/35 text-sm mb-8">Double-check the room code and try again.</p>
+          <p className="text-white/35 text-sm mb-8">
+            Double-check the room code and try again.
+          </p>
           <Link
             href="/"
             className="inline-flex h-10 items-center px-6 rounded-2xl bg-white/[0.06] hover:bg-white/[0.1] text-sm font-medium transition-colors"
@@ -514,15 +602,19 @@ export default function RoomPage({ params }: RoomPageProps) {
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <div className="flex items-center gap-3 mb-1.5">
-                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">{room.name}</h1>
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
+                  {room.name}
+                </h1>
                 {isAdmin && (
-                <span className="px-2.5 py-0.5 text-[11px] font-bold bg-primary/20 text-primary border border-primary/30 uppercase tracking-widest rounded-lg">
+                  <span className="px-2.5 py-0.5 text-[11px] font-bold bg-primary/20 text-primary border border-primary/30 uppercase tracking-widest rounded-lg">
                     Host
                   </span>
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/35">
-                <span className="font-mono text-base sm:text-lg text-primary tracking-[0.2em] font-semibold">{room.code}</span>
+                <span className="font-mono text-base sm:text-lg text-primary tracking-[0.2em] font-semibold">
+                  {room.code}
+                </span>
                 <span className="w-1 h-1 rounded-full bg-white/15" />
                 <span className="flex items-center gap-1.5">
                   <span className="relative flex h-2 w-2">
@@ -540,13 +632,19 @@ export default function RoomPage({ params }: RoomPageProps) {
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {!allowGuestAdd && (
-                <span className="px-2.5 py-1 text-[10px] font-medium rounded-lg bg-red-500/10 text-red-400 border border-red-500/20">Guest add off</span>
+                <span className="px-2.5 py-1 text-[10px] font-medium rounded-lg bg-red-500/10 text-red-400 border border-red-500/20">
+                  Guest add off
+                </span>
               )}
               {room.settings.allowDownvotes && (
-                <span className="px-2.5 py-1 text-[10px] font-medium rounded-lg bg-primary/10 text-primary border border-primary/20">Downvotes on</span>
+                <span className="px-2.5 py-1 text-[10px] font-medium rounded-lg bg-primary/10 text-primary border border-primary/20">
+                  Downvotes on
+                </span>
               )}
               {maxSongsPerUser > 0 && (
-                <span className="px-2.5 py-1 text-[10px] font-medium rounded-lg bg-white/[0.06] text-white/50 border border-white/[0.08]">{maxSongsPerUser}/user</span>
+                <span className="px-2.5 py-1 text-[10px] font-medium rounded-lg bg-white/[0.06] text-white/50 border border-white/[0.08]">
+                  {maxSongsPerUser}/user
+                </span>
               )}
               <button
                 onClick={handleLeaveRoom}
@@ -560,10 +658,11 @@ export default function RoomPage({ params }: RoomPageProps) {
 
         {/* ── Main Content Grid ─────────────────────────────────────── */}
         <div className="grid gap-6 lg:gap-8 lg:grid-cols-[1.1fr_0.9fr]">
-
           {/* ── Left: Now Playing ── */}
           <section className="space-y-5">
-            <h2 className="text-[11px] font-semibold uppercase tracking-[0.25em] text-primary">Now Playing</h2>
+            <h2 className="text-[11px] font-semibold uppercase tracking-[0.25em] text-primary">
+              Now Playing
+            </h2>
 
             {currentSong ? (
               <div className="space-y-4">
@@ -585,11 +684,15 @@ export default function RoomPage({ params }: RoomPageProps) {
                         {currentSong.title}
                       </p>
                       <div className="flex items-center gap-2 text-sm text-white/45">
-                        {currentSong.artist && <span>{currentSong.artist}</span>}
+                        {currentSong.artist && (
+                          <span>{currentSong.artist}</span>
+                        )}
                         {currentSong.addedByName && (
                           <>
                             <span className="w-1 h-1 rounded-full bg-white/25" />
-                            <span className="text-white/30">Added by {currentSong.addedByName}</span>
+                            <span className="text-white/30">
+                              Added by {currentSong.addedByName}
+                            </span>
                           </>
                         )}
                       </div>
@@ -616,7 +719,10 @@ export default function RoomPage({ params }: RoomPageProps) {
                 </div>
 
                 {/* Hidden YouTube player */}
-                <div className="fixed -left-[9999px] top-0 opacity-0 pointer-events-none" aria-hidden>
+                <div
+                  className="fixed -left-[9999px] top-0 opacity-0 pointer-events-none"
+                  aria-hidden
+                >
                   <YouTube
                     key={currentSong.providerId}
                     videoId={currentSong.providerId}
@@ -630,7 +736,10 @@ export default function RoomPage({ params }: RoomPageProps) {
                         disablekb: 1,
                         fs: 0,
                         modestbranding: 1,
-                        origin: typeof window !== "undefined" ? window.location.origin : "",
+                        origin:
+                          typeof window !== "undefined"
+                            ? window.location.origin
+                            : "",
                       },
                     }}
                     onReady={(e: any) => {
@@ -648,7 +757,9 @@ export default function RoomPage({ params }: RoomPageProps) {
                       // 0 = ended — backup for background tabs where onEnd may not fire
                       if (e.data === 0) handleSongEnd();
                     }}
-                    onError={(e: any) => console.error("YouTube player error:", e.data)}
+                    onError={(e: any) =>
+                      console.error("YouTube player error:", e.data)
+                    }
                   />
                 </div>
 
@@ -666,15 +777,38 @@ export default function RoomPage({ params }: RoomPageProps) {
                         title={room?.isPaused ? "Play" : "Pause"}
                       >
                         {room?.isPaused ? (
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="8,5 20,12 8,19" /></svg>
+                          <svg
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                          >
+                            <polygon points="8,5 20,12 8,19" />
+                          </svg>
                         ) : (
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+                          <svg
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                          >
+                            <rect x="6" y="4" width="4" height="16" rx="1" />
+                            <rect x="14" y="4" width="4" height="16" rx="1" />
+                          </svg>
                         )}
                       </button>
                     )}
                     {!isHost && room?.isPaused && (
                       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/[0.05] text-white/25">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+                        <svg
+                          width="18"
+                          height="18"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                        >
+                          <rect x="6" y="4" width="4" height="16" rx="1" />
+                          <rect x="14" y="4" width="4" height="16" rx="1" />
+                        </svg>
                       </div>
                     )}
                     <div className="flex-1">
@@ -684,12 +818,22 @@ export default function RoomPage({ params }: RoomPageProps) {
                       <button
                         type="button"
                         onClick={() => {
-                          if (room) { handleSongEnd(); }
+                          if (room) {
+                            handleSongEnd();
+                          }
                         }}
                         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent hover:bg-accent/80 text-white transition-all duration-200"
                         title="Skip to next"
                       >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="4,4 16,12 4,20" /><rect x="17" y="4" width="3" height="16" rx="1" /></svg>
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                        >
+                          <polygon points="4,4 16,12 4,20" />
+                          <rect x="17" y="4" width="3" height="16" rx="1" />
+                        </svg>
                       </button>
                     )}
                   </div>
@@ -716,18 +860,45 @@ export default function RoomPage({ params }: RoomPageProps) {
                         title={isMuted ? "Unmute" : "Mute"}
                       >
                         {isMuted || volume === 0 ? (
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <svg
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
                             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
                             <line x1="23" y1="9" x2="17" y2="15" />
                             <line x1="17" y1="9" x2="23" y2="15" />
                           </svg>
                         ) : volume < 50 ? (
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <svg
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
                             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
                             <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
                           </svg>
                         ) : (
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <svg
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
                             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
                             <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
                             <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
@@ -763,7 +934,9 @@ export default function RoomPage({ params }: RoomPageProps) {
             ) : (
               <div className="glass rounded-3xl p-12 sm:p-16 text-center border-l-4 !border-l-white/20">
                 <div className="text-5xl mb-4 opacity-20">♪</div>
-                <p className="text-white/30 text-sm">Add a song to get started</p>
+                <p className="text-white/30 text-sm">
+                  Add a song to get started
+                </p>
               </div>
             )}
           </section>
@@ -773,38 +946,69 @@ export default function RoomPage({ params }: RoomPageProps) {
             {/* Queue */}
             <div>
               <div className="flex items-center justify-between mb-4">
-                <h2 className="text-[11px] font-semibold uppercase tracking-[0.25em] text-primary">Up Next</h2>
+                <h2 className="text-[11px] font-semibold uppercase tracking-[0.25em] text-primary">
+                  Up Next
+                </h2>
                 <span className="text-[11px] text-white/15 tabular-nums">
-                  {queueSongs.length} tracks{isAdmin ? " · Drag to reorder" : ""}
+                  {queueSongs.length} tracks
+                  {isAdmin ? " · Drag to reorder" : ""}
                 </span>
               </div>
 
               <div className="space-y-1.5">
                 {queueSongs.length === 0 ? (
                   <div className="glass rounded-2xl p-8 text-center">
-                    <p className="text-white/25 text-sm">No songs in queue. Add one below.</p>
+                    <p className="text-white/25 text-sm">
+                      No songs in queue. Add one below.
+                    </p>
                   </div>
                 ) : (
                   queueSongs.map((song, index) => {
                     const currentVote = voteMap.get(song._id) ?? 0;
-                    const canRemove = isAdmin || (userId && song.addedBy === userId);
+                    const canRemove =
+                      isAdmin || (userId && song.addedBy === userId);
                     return (
                       <div
                         key={song._id}
                         draggable={isAdmin}
-                        onDragStart={() => { if (isAdmin) setDragIdx(index); }}
-                        onDragOver={(e) => { if (isAdmin) { e.preventDefault(); setDragOverIdx(index); } }}
+                        onDragStart={() => {
+                          if (isAdmin) setDragIdx(index);
+                        }}
+                        onDragOver={(e) => {
+                          if (isAdmin) {
+                            e.preventDefault();
+                            setDragOverIdx(index);
+                          }
+                        }}
                         onDragLeave={() => setDragOverIdx(null)}
                         onDrop={async () => {
-                          if (!isAdmin || dragIdx === null || dragIdx === index || !userId) return;
-                          try { await reorderSong({ songId: queueSongs[dragIdx]._id, userId, newIndex: index }); } catch { /* ignore */ }
-                          setDragIdx(null); setDragOverIdx(null);
+                          if (
+                            !isAdmin ||
+                            dragIdx === null ||
+                            dragIdx === index ||
+                            !userId
+                          )
+                            return;
+                          try {
+                            await reorderSong({
+                              songId: queueSongs[dragIdx]._id,
+                              userId,
+                              newIndex: index,
+                            });
+                          } catch {
+                            /* ignore */
+                          }
+                          setDragIdx(null);
+                          setDragOverIdx(null);
                         }}
-                        onDragEnd={() => { setDragIdx(null); setDragOverIdx(null); }}
+                        onDragEnd={() => {
+                          setDragIdx(null);
+                          setDragOverIdx(null);
+                        }}
                         className={`group relative rounded-2xl px-3.5 py-3 sm:px-4 transition-all duration-200 ${
                           dragOverIdx === index
-                              ? "glass !border-primary/15 !bg-primary/[0.03]"
-                              : "glass glass-hover"
+                            ? "glass !border-primary/15 !bg-primary/[0.03]"
+                            : "glass glass-hover"
                         } ${isAdmin ? "cursor-grab active:cursor-grabbing" : ""} ${
                           dragIdx === index ? "opacity-40 scale-[0.98]" : ""
                         }`}
@@ -812,7 +1016,9 @@ export default function RoomPage({ params }: RoomPageProps) {
                         <div className="flex items-center gap-3">
                           {/* Track indicator */}
                           <div className="w-7 shrink-0 flex items-center justify-center">
-                              <span className="text-xs text-accent/30 font-mono tabular-nums">{String(index + 1).padStart(2, "0")}</span>
+                            <span className="text-xs text-accent/30 font-mono tabular-nums">
+                              {String(index + 1).padStart(2, "0")}
+                            </span>
                           </div>
 
                           {/* Song info */}
@@ -821,11 +1027,15 @@ export default function RoomPage({ params }: RoomPageProps) {
                               {song.title}
                             </p>
                             <div className="flex items-center gap-1.5 text-[11px] text-white/25 mt-0.5">
-                              {song.artist && <span className="truncate">{song.artist}</span>}
+                              {song.artist && (
+                                <span className="truncate">{song.artist}</span>
+                              )}
                               {song.addedByName && (
                                 <>
                                   <span className="w-0.5 h-0.5 rounded-full bg-white/15 shrink-0" />
-                                  <span className="truncate">{song.addedByName}</span>
+                                  <span className="truncate">
+                                    {song.addedByName}
+                                  </span>
                                 </>
                               )}
                             </div>
@@ -835,8 +1045,12 @@ export default function RoomPage({ params }: RoomPageProps) {
                           <div className="flex items-center gap-0.5 shrink-0">
                             <button
                               type="button"
-                              onClick={() => handleVote(song._id, currentVote === 1 ? 0 : 1)}
-                              disabled={!userId}
+                              onClick={() =>
+                                handleVote(song._id, currentVote === 1 ? 0 : 1)
+                              }
+                              disabled={
+                                !userId || votingInProgress.has(song._id)
+                              }
                               className={`group/vote relative p-1.5 rounded-xl transition-all duration-200 ${
                                 currentVote === 1
                                   ? "bg-primary text-white shadow-sm shadow-primary/30"
@@ -844,35 +1058,62 @@ export default function RoomPage({ params }: RoomPageProps) {
                               } disabled:opacity-30 disabled:cursor-not-allowed`}
                             >
                               {/* Ring burst on vote */}
-                              {votedSongs.has(song._id) && currentVote === 1 && (
-                                <span className="absolute inset-0 rounded-xl border-2 border-primary/50 animate-vote-ring" />
-                              )}
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" className={`transition-transform duration-200 group-hover/vote:scale-110 group-hover/vote:-translate-y-0.5 ${votedSongs.has(song._id) && currentVote === 1 ? "animate-vote-burst" : ""}`}>
+                              {votedSongs.has(song._id) &&
+                                currentVote === 1 && (
+                                  <span className="absolute inset-0 rounded-xl border-2 border-primary/50 animate-vote-ring" />
+                                )}
+                              <svg
+                                width="16"
+                                height="16"
+                                viewBox="0 0 24 24"
+                                fill="currentColor"
+                                className={`transition-transform duration-200 group-hover/vote:scale-110 group-hover/vote:-translate-y-0.5 ${votedSongs.has(song._id) && currentVote === 1 ? "animate-vote-burst" : ""}`}
+                              >
                                 <path d="M12 4c.3 0 .6.1.8.4l5.5 7.5c.4.5.1 1.1-.5 1.1H14v6.5c0 .8-.7 1.5-1.5 1.5h-1c-.8 0-1.5-.7-1.5-1.5V13H6.2c-.6 0-.9-.6-.5-1.1l5.5-7.5c.2-.3.5-.4.8-.4z" />
                               </svg>
                             </button>
 
-                            <span className={`text-xs font-bold tabular-nums min-w-[2.5ch] text-center px-1.5 py-0.5 rounded-lg transition-all duration-200 ${
-                              song.score > 0 ? "text-white bg-primary" : song.score < 0 ? "text-white bg-destructive" : "text-white/25 bg-white/[0.06]"
-                            } ${votedSongs.has(song._id) ? "animate-score-pop" : ""}`}>
+                            <span
+                              className={`text-xs font-bold tabular-nums min-w-[2.5ch] text-center px-1.5 py-0.5 rounded-lg transition-all duration-200 ${
+                                song.score > 0
+                                  ? "text-white bg-primary"
+                                  : song.score < 0
+                                    ? "text-white bg-destructive"
+                                    : "text-white/25 bg-white/[0.06]"
+                              } ${votedSongs.has(song._id) ? "animate-score-pop" : ""}`}
+                            >
                               {song.score > 0 ? `+${song.score}` : song.score}
                             </span>
 
                             {room.settings.allowDownvotes && (
                               <button
                                 type="button"
-                                onClick={() => handleVote(song._id, currentVote === -1 ? 0 : -1)}
-                                disabled={!userId}
+                                onClick={() =>
+                                  handleVote(
+                                    song._id,
+                                    currentVote === -1 ? 0 : -1,
+                                  )
+                                }
+                                disabled={
+                                  !userId || votingInProgress.has(song._id)
+                                }
                                 className={`group/vote relative p-1.5 rounded-xl transition-all duration-200 ${
                                   currentVote === -1
                                     ? "bg-destructive text-black shadow-sm shadow-destructive/30"
                                     : "text-white/20 hover:text-destructive hover:bg-destructive/20"
                                 } disabled:opacity-30 disabled:cursor-not-allowed`}
                               >
-                                {votedSongs.has(song._id) && currentVote === -1 && (
-                                  <span className="absolute inset-0 rounded-xl border-2 border-destructive/50 animate-vote-ring" />
-                                )}
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" className={`transition-transform duration-200 group-hover/vote:scale-110 group-hover/vote:translate-y-0.5 ${votedSongs.has(song._id) && currentVote === -1 ? "animate-vote-burst" : ""}`}>
+                                {votedSongs.has(song._id) &&
+                                  currentVote === -1 && (
+                                    <span className="absolute inset-0 rounded-xl border-2 border-destructive/50 animate-vote-ring" />
+                                  )}
+                                <svg
+                                  width="16"
+                                  height="16"
+                                  viewBox="0 0 24 24"
+                                  fill="currentColor"
+                                  className={`transition-transform duration-200 group-hover/vote:scale-110 group-hover/vote:translate-y-0.5 ${votedSongs.has(song._id) && currentVote === -1 ? "animate-vote-burst" : ""}`}
+                                >
                                   <path d="M12 20c-.3 0-.6-.1-.8-.4l-5.5-7.5c-.4-.5-.1-1.1.5-1.1H10V4.5c0-.8.7-1.5 1.5-1.5h1c.8 0 1.5.7 1.5 1.5V11h3.8c.6 0 .9.6.5 1.1l-5.5 7.5c-.2.3-.5.4-.8.4z" />
                                 </svg>
                               </button>
@@ -884,8 +1125,18 @@ export default function RoomPage({ params }: RoomPageProps) {
                                 onClick={() => handleRemoveSong(song._id)}
                                 className="p-1.5 rounded-lg text-transparent group-hover:text-white/15 hover:!text-red-400 hover:!bg-red-500/10 transition-all duration-200"
                               >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                                <svg
+                                  width="12"
+                                  height="12"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2.5"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <line x1="18" y1="6" x2="6" y2="18" />
+                                  <line x1="6" y1="6" x2="18" y2="18" />
                                 </svg>
                               </button>
                             )}
@@ -900,7 +1151,12 @@ export default function RoomPage({ params }: RoomPageProps) {
                               placeholder="Score"
                               type="number"
                               value={scoreInputs[song._id] ?? ""}
-                              onChange={(e) => setScoreInputs((prev) => ({ ...prev, [song._id]: e.target.value }))}
+                              onChange={(e) =>
+                                setScoreInputs((prev) => ({
+                                  ...prev,
+                                  [song._id]: e.target.value,
+                                }))
+                              }
                             />
                             <button
                               type="button"
@@ -914,7 +1170,12 @@ export default function RoomPage({ params }: RoomPageProps) {
                               placeholder="+/−"
                               type="number"
                               value={voteInputs[song._id] ?? ""}
-                              onChange={(e) => setVoteInputs((prev) => ({ ...prev, [song._id]: e.target.value }))}
+                              onChange={(e) =>
+                                setVoteInputs((prev) => ({
+                                  ...prev,
+                                  [song._id]: e.target.value,
+                                }))
+                              }
                             />
                             <button
                               type="button"
@@ -934,12 +1195,18 @@ export default function RoomPage({ params }: RoomPageProps) {
 
             {/* Song limit indicator */}
             {maxSongsPerUser > 0 && !isAdmin && (
-              <div className={`glass rounded-2xl px-4 py-3 text-sm ${atSongLimit ? "!border-destructive !bg-destructive/[0.12]" : ""}`}>
+              <div
+                className={`glass rounded-2xl px-4 py-3 text-sm ${atSongLimit ? "!border-destructive !bg-destructive/[0.12]" : ""}`}
+              >
                 <span className="text-white/40">
                   You{"'"}ve added{" "}
-                  <span className="font-semibold text-white/60">{userSongCount}/{maxSongsPerUser}</span>
-                  {" "}songs.
-                  {atSongLimit ? " Limit reached." : ` ${maxSongsPerUser - userSongCount} remaining.`}
+                  <span className="font-semibold text-white/60">
+                    {userSongCount}/{maxSongsPerUser}
+                  </span>{" "}
+                  songs.
+                  {atSongLimit
+                    ? " Limit reached."
+                    : ` ${maxSongsPerUser - userSongCount} remaining.`}
                 </span>
               </div>
             )}
@@ -947,7 +1214,9 @@ export default function RoomPage({ params }: RoomPageProps) {
             {/* Add Song */}
             <div className="glass rounded-2xl sm:rounded-3xl p-5 sm:p-6 border-l-4 !border-l-primary">
               <div className="flex items-center justify-between mb-5">
-                <h3 className="text-sm font-semibold text-primary">Add a song</h3>
+                <h3 className="text-sm font-semibold text-primary">
+                  Add a song
+                </h3>
                 {/* Search toggle button */}
                 <button
                   type="button"
@@ -959,8 +1228,18 @@ export default function RoomPage({ params }: RoomPageProps) {
                   }`}
                   title="Search"
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <circle cx="11" cy="11" r="8" />
+                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
                   </svg>
                 </button>
               </div>
@@ -968,13 +1247,26 @@ export default function RoomPage({ params }: RoomPageProps) {
               {/* Expandable search area */}
               <div
                 className={`overflow-hidden transition-all duration-300 ease-out ${
-                  searchExpanded ? "max-h-[500px] opacity-100 mb-4" : "max-h-0 opacity-0"
+                  searchExpanded
+                    ? "max-h-[500px] opacity-100 mb-4"
+                    : "max-h-0 opacity-0"
                 }`}
               >
                 <form className="space-y-3" onSubmit={handleSearch}>
                   <div className="relative">
-                    <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/20 pointer-events-none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                    <svg
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/20 pointer-events-none"
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <circle cx="11" cy="11" r="8" />
+                      <line x1="21" y1="21" x2="16.65" y2="16.65" />
                     </svg>
                     <input
                       value={searchQuery}
@@ -990,7 +1282,9 @@ export default function RoomPage({ params }: RoomPageProps) {
                   >
                     {isSearching ? "Searching…" : "Search"}
                   </button>
-                  {searchError && <p className="text-xs text-red-400/80">{searchError}</p>}
+                  {searchError && (
+                    <p className="text-xs text-red-400/80">{searchError}</p>
+                  )}
                 </form>
               </div>
 
@@ -998,15 +1292,26 @@ export default function RoomPage({ params }: RoomPageProps) {
               {searchResults.length > 0 && (
                 <div className="space-y-1 mb-6">
                   {searchResults.slice(0, 3).map((track) => (
-                    <div key={track.id} className="group flex items-center gap-3 rounded-xl p-2.5 hover:bg-white/[0.04] border border-transparent hover:border-white/[0.06] transition-all duration-200">
+                    <div
+                      key={track.id}
+                      className="group flex items-center gap-3 rounded-xl p-2.5 hover:bg-white/[0.04] border border-transparent hover:border-white/[0.06] transition-all duration-200"
+                    >
                       <div className="h-11 w-16 overflow-hidden rounded-lg bg-white/[0.04] shrink-0 ring-1 ring-white/[0.06]">
                         {track.thumbnailUrl && (
-                          <img src={track.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                          <img
+                            src={track.thumbnailUrl}
+                            alt=""
+                            className="h-full w-full object-cover"
+                          />
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-white/80 truncate">{track.title}</p>
-                        <p className="text-[11px] text-white/25 truncate">{track.channel}</p>
+                        <p className="text-sm font-medium text-white/80 truncate">
+                          {track.title}
+                        </p>
+                        <p className="text-[11px] text-white/25 truncate">
+                          {track.channel}
+                        </p>
                       </div>
                       <button
                         type="button"
@@ -1020,8 +1325,100 @@ export default function RoomPage({ params }: RoomPageProps) {
                   ))}
                 </div>
               )}
-
             </div>
+
+            {/* Recently Played */}
+            {recentlyPlayed && recentlyPlayed.length > 0 && (
+              <div className="glass rounded-2xl sm:rounded-3xl p-5 sm:p-6 border-l-4 !border-l-accent mt-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-sm font-semibold text-accent">
+                    Recently Played
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setRecentlyPlayedExpanded((v) => !v)}
+                    className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all duration-300 ${
+                      recentlyPlayedExpanded
+                        ? "bg-accent/20 text-accent border border-accent/30"
+                        : "bg-white/[0.06] text-white/40 hover:text-accent hover:bg-accent/10 border border-white/[0.08] hover:border-accent/20"
+                    }`}
+                    title={recentlyPlayedExpanded ? "Collapse" : "Expand"}
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className={`transition-transform duration-300 ${recentlyPlayedExpanded ? "rotate-180" : ""}`}
+                    >
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div
+                  className={`overflow-hidden transition-all duration-300 ease-out ${
+                    recentlyPlayedExpanded
+                      ? "max-h-[400px] opacity-100"
+                      : "max-h-0 opacity-0"
+                  }`}
+                >
+                  <div className="space-y-1.5 max-h-[380px] overflow-y-auto pr-1">
+                    {recentlyPlayed.slice(0, 10).map((song) => (
+                      <div
+                        key={song._id}
+                        className="group flex items-center gap-3 rounded-xl p-2.5 hover:bg-white/[0.04] border border-transparent hover:border-white/[0.06] transition-all duration-200"
+                      >
+                        <div className="h-10 w-14 overflow-hidden rounded-lg bg-white/[0.04] shrink-0 ring-1 ring-white/[0.06]">
+                          {song.providerId && (
+                            <img
+                              src={`https://img.youtube.com/vi/${song.providerId}/default.jpg`}
+                              alt=""
+                              className="h-full w-full object-cover"
+                            />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-white/70 truncate">
+                            {song.title}
+                          </p>
+                          <p className="text-[11px] text-white/25 truncate">
+                            {song.artist || "Unknown artist"}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleReaddSong(song._id)}
+                          disabled={
+                            !canAdd ||
+                            !userId ||
+                            readdingInProgress.has(song._id)
+                          }
+                          className="shrink-0 h-7 px-3 rounded-lg text-[11px] font-bold bg-accent/80 hover:bg-accent text-black border border-accent/50 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200"
+                        >
+                          {readdingInProgress.has(song._id)
+                            ? "..."
+                            : atSongLimit
+                              ? "Limit"
+                              : "+ Re-add"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {!recentlyPlayedExpanded && (
+                  <p className="text-[11px] text-white/25">
+                    {recentlyPlayed.length} song
+                    {recentlyPlayed.length !== 1 ? "s" : ""} played
+                  </p>
+                )}
+              </div>
+            )}
           </section>
         </div>
 
@@ -1029,16 +1426,22 @@ export default function RoomPage({ params }: RoomPageProps) {
         {isAdmin && (
           <section className="mt-8 glass rounded-2xl sm:rounded-3xl p-5 sm:p-6 !border-primary/30">
             <h3 className="flex items-center gap-2 text-sm font-semibold text-primary mb-5">
-              <span className="w-5 h-5 rounded-md bg-primary flex items-center justify-center text-[10px] text-white">★</span>
+              <span className="w-5 h-5 rounded-md bg-primary flex items-center justify-center text-[10px] text-white">
+                ★
+              </span>
               Host Controls
             </h3>
             <div className="grid gap-6 sm:grid-cols-3">
               {/* Settings */}
               <div className="space-y-3">
-                <p className="text-xs font-medium text-primary uppercase tracking-wider">Settings</p>
+                <p className="text-xs font-medium text-primary uppercase tracking-wider">
+                  Settings
+                </p>
                 <div className="flex items-end gap-2">
                   <div className="flex-1">
-                    <label className="text-[11px] text-white/25 mb-1 block">Max songs/user</label>
+                    <label className="text-[11px] text-white/25 mb-1 block">
+                      Max songs/user
+                    </label>
                     <input
                       className="w-full h-8 rounded-lg bg-white/[0.04] border border-white/[0.06] px-2.5 text-xs text-white placeholder:text-white/20 focus:outline-none focus:border-primary/30"
                       type="number"
@@ -1060,9 +1463,13 @@ export default function RoomPage({ params }: RoomPageProps) {
 
               {/* Transfer Host */}
               <div className="space-y-3">
-                <p className="text-xs font-medium text-primary uppercase tracking-wider">Transfer Host</p>
+                <p className="text-xs font-medium text-primary uppercase tracking-wider">
+                  Transfer Host
+                </p>
                 {contributors.length === 0 ? (
-                  <p className="text-[11px] text-white/20">No other contributors yet.</p>
+                  <p className="text-[11px] text-white/20">
+                    No other contributors yet.
+                  </p>
                 ) : (
                   <div className="flex items-end gap-2">
                     <select
@@ -1072,7 +1479,9 @@ export default function RoomPage({ params }: RoomPageProps) {
                     >
                       <option value="">Select user</option>
                       {contributors.map((c) => (
-                        <option key={c.id} value={c.id}>{c.name}</option>
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
                       ))}
                     </select>
                     <button
@@ -1089,10 +1498,14 @@ export default function RoomPage({ params }: RoomPageProps) {
 
               {/* Danger Zone */}
               <div className="space-y-3">
-                <p className="text-xs font-medium text-destructive uppercase tracking-wider">Danger</p>
+                <p className="text-xs font-medium text-destructive uppercase tracking-wider">
+                  Danger
+                </p>
                 {confirmDestroy ? (
                   <div className="space-y-2">
-                    <p className="text-xs text-white/40">Are you sure? This deletes everything.</p>
+                    <p className="text-xs text-white/40">
+                      Are you sure? This deletes everything.
+                    </p>
                     <div className="flex gap-2">
                       <button
                         type="button"
@@ -1145,9 +1558,13 @@ export default function RoomPage({ params }: RoomPageProps) {
               />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold truncate text-white/90">{currentSong.title}</p>
+              <p className="text-sm font-semibold truncate text-white/90">
+                {currentSong.title}
+              </p>
               {currentSong.artist && (
-                <p className="text-[11px] text-white/30 truncate">{currentSong.artist}</p>
+                <p className="text-[11px] text-white/30 truncate">
+                  {currentSong.artist}
+                </p>
               )}
             </div>
             {isHost && (
@@ -1161,17 +1578,44 @@ export default function RoomPage({ params }: RoomPageProps) {
                   className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-white hover:brightness-110 transition-colors"
                 >
                   {room?.isPaused ? (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="8,5 20,12 8,19" /></svg>
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                    >
+                      <polygon points="8,5 20,12 8,19" />
+                    </svg>
                   ) : (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                    >
+                      <rect x="6" y="4" width="4" height="16" rx="1" />
+                      <rect x="14" y="4" width="4" height="16" rx="1" />
+                    </svg>
                   )}
                 </button>
                 <button
                   type="button"
-                  onClick={() => { if (room) { handleSongEnd(); } }}
+                  onClick={() => {
+                    if (room) {
+                      handleSongEnd();
+                    }
+                  }}
                   className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white hover:brightness-110 transition-colors"
                 >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="4,4 16,12 4,20" /><rect x="17" y="4" width="3" height="16" rx="1" /></svg>
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <polygon points="4,4 16,12 4,20" />
+                    <rect x="17" y="4" width="3" height="16" rx="1" />
+                  </svg>
                 </button>
               </div>
             )}

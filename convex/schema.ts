@@ -62,4 +62,16 @@ export default defineSchema({
   })
     .index("by_room_updated", ["roomId", "updatedAt"])
     .index("by_user_room", ["userId", "roomId"]),
+
+  playedSongs: defineTable({
+    roomId: v.id("rooms"),
+    provider: v.union(v.literal("youtube"), v.literal("custom")),
+    providerId: v.string(),
+    title: v.string(),
+    artist: v.optional(v.string()),
+    albumArtUrl: v.optional(v.string()),
+    addedBy: v.string(),
+    addedByName: v.optional(v.string()),
+    playedAt: v.number(),
+  }).index("by_room_played", ["roomId", "playedAt"]),
 });
