@@ -3,6 +3,9 @@ import type { MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { Id } from "./_generated/dataModel";
 
+// Maximum number of played songs to retain per room
+const MAX_PLAYED_SONGS_PER_ROOM = 100;
+
 function generateRoomCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
@@ -203,6 +206,19 @@ export const advanceSong = mutation({
           addedByName: finishedSong.addedByName,
           playedAt: Date.now(),
         });
+
+        // Cleanup: remove old played songs beyond the retention limit
+        const playedSongs = await ctx.db
+          .query("playedSongs")
+          .withIndex("by_room_played", (q) => q.eq("roomId", args.roomId))
+          .order("desc")
+          .collect();
+        if (playedSongs.length > MAX_PLAYED_SONGS_PER_ROOM) {
+          const toDelete = playedSongs.slice(MAX_PLAYED_SONGS_PER_ROOM);
+          for (const old of toDelete) {
+            await ctx.db.delete(old._id);
+          }
+        }
 
         // Delete votes for the finished song
         const votes = await ctx.db

@@ -62,6 +62,18 @@ export const readdSong = mutation({
       }
     }
 
+    // Check if song is currently playing
+    if (room.currentSongId) {
+      const currentSong = await ctx.db.get(room.currentSongId);
+      if (
+        currentSong &&
+        currentSong.provider === playedSong.provider &&
+        currentSong.providerId === playedSong.providerId
+      ) {
+        throw new Error("This song is currently playing.");
+      }
+    }
+
     // Check if song is already in the queue
     const existing = await ctx.db
       .query("songs")
@@ -80,7 +92,7 @@ export const readdSong = mutation({
     const now = Date.now();
 
     // Add the song back to the queue
-    await ctx.db.insert("songs", {
+    const songId = await ctx.db.insert("songs", {
       roomId: args.roomId,
       provider: playedSong.provider,
       providerId: playedSong.providerId,
@@ -93,6 +105,15 @@ export const readdSong = mutation({
       score: 0,
       lastScoreUpdatedAt: now,
     });
+
+    // If this is the first song in the queue, set it as currentSongId in the room
+    const queue = await ctx.db
+      .query("songs")
+      .withIndex("by_room", (q) => q.eq("roomId", args.roomId))
+      .collect();
+    if (queue.length === 1) {
+      await ctx.db.patch(args.roomId, { currentSongId: songId });
+    }
 
     return { success: true };
   },
